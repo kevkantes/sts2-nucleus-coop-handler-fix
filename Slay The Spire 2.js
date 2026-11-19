@@ -182,23 +182,35 @@ Game.Play = function() {
 	  Context.ReplaceLinesInTextFile(settingsFile, modifySettings);
   };
 
+  // NOTE (fix for freeze when setup finishes with input unlocked):
+  // The GetRawInputData, RegisterRawInputDevices and MessageFilter hooks are installed at injection
+  // (see Game.ProtoInput.* above) and must stay installed for the whole session.
+  // Previously OnInputUnlocked uninstalled them while also enabling SetRawInputBypass. With bypass on,
+  // ProtoInput forwards ALL real mouse/keyboard input to the game as WM_INPUT carrying a fake
+  // 0xAB0000xx handle that only the GetRawInputData hook understands. With that hook removed, Godot
+  // called the real GetRawInputData on the fake handle, got an uninitialised buffer size back and
+  // allocated garbage-sized buffers on every input event -> both windows froze (audio kept playing).
+  // Nucleus calls OnInputUnlocked automatically at the end of setup when input isn't locked yet,
+  // which is why it froze exactly at "press End to lock inputs" but not when locking early.
+  // This mirrors the reference example in "readme Proto Input.txt".
+
+  // Tracks which state the toggleable hooks are in, so repeated callbacks (Nucleus calls the
+  // current-state callback once more at the end of setup) don't stack duplicate EasyHook hooks.
+  var protoHooksLocked = null;
+
   Game.ProtoInput.OnInputLocked = function() {
     for (var i = 0; i < PlayerList.Count; i++) {
       var player = PlayerList[i];
 
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetAsyncKeyStateHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyboardStateHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.CursorVisibilityStateHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetRawInputDataHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.RegisterRawInputHookID);
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.MessageFilterHookID);
-
-      //ProtoInput.EnableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.MouseMoveFilterID);
-
-      ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.FocusHooksHookID);
+      if (protoHooksLocked !== true) {
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetAsyncKeyStateHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyboardStateHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.CursorVisibilityStateHookID);
+        ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.FocusHooksHookID);
+      }
 
       ProtoInput.EnableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.RawInputFilterID);
       ProtoInput.EnableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.MouseActivateFilterID);
@@ -210,6 +222,7 @@ Game.Play = function() {
 
       ProtoInput.SetDrawFakeCursor(player.ProtoInputInstanceHandle, true);
 
+      // Only the player's own selected mouse/keyboard reaches this instance
       ProtoInput.SetRawInputBypass(player.ProtoInputInstanceHandle, false);
 
       ProtoInput.StartFocusMessageLoop(player.ProtoInputInstanceHandle, 0, true, true, false, false, false);
@@ -218,23 +231,26 @@ Game.Play = function() {
 
       ProtoInput.StopFocusMessageLoop(player.ProtoInputInstanceHandle);
     }
+    protoHooksLocked = true;
   };
 
   Game.ProtoInput.OnInputUnlocked = function() {
     for (var i = 0; i < PlayerList.Count; i++) {
       var player = PlayerList[i];
 
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetAsyncKeyStateHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyboardStateHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.CursorVisibilityStateHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetRawInputDataHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.RegisterRawInputHookID);
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.MessageFilterHookID);
+      ProtoInput.StopFocusMessageLoop(player.ProtoInputInstanceHandle);
 
-      ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.FocusHooksHookID);
+      if (protoHooksLocked !== false) {
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetAsyncKeyStateHookID);
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyboardStateHookID);
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.CursorVisibilityStateHookID);
+        // Intentionally drop fake focus so all instances don't react to the real mouse at once
+        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.FocusHooksHookID);
+        // DO NOT uninstall GetRawInputDataHookID / RegisterRawInputHookID / MessageFilterHookID here (see note above)
+      }
 
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.RawInputFilterID);
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.MouseMoveFilterID);
@@ -247,7 +263,10 @@ Game.Play = function() {
 
       ProtoInput.SetDrawFakeCursor(player.ProtoInputInstanceHandle, false);
 
+      // Let the real mouse/keyboard through while unlocked. Safe now because the
+      // GetRawInputData hook stays installed to decode the forwarded WM_INPUT handles.
       ProtoInput.SetRawInputBypass(player.ProtoInputInstanceHandle, true);
     }
+    protoHooksLocked = false;
   };
 };
