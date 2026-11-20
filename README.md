@@ -58,6 +58,20 @@ The first commit in this repo is the original handler, so `git diff` shows exact
    Nucleus re-reads the handler each time you press Play, so you don't need to restart it.
 3. Optional: change **Graphics API** in the handler's options. Vulkan is the default.
 
+## Controllers (PlayStation pads + DS4Windows)
+
+If you use DS4Windows (or similar) to turn PlayStation pads into virtual Xbox controllers, the games
+see **both** the real pad and its virtual copy. That causes double inputs, and every pad also controls
+the other players' screens. The fix is to hide the real pads with **[HidHide](https://github.com/nefarius/HidHide)**:
+
+1. Install HidHide and ViGEmBus. DS4Windows can install both.
+2. Either turn on DS4Windows' option to hide the real controllers (it uses HidHide), or hide the real
+   pads in the HidHide client yourself. In that case, add DS4Windows to HidHide's application list so it can still read them.
+3. In Nucleus, assign one virtual Xbox controller to each player.
+
+With HidHide turned on, each pad controls only its own player's screen and there are no double inputs.
+No handler changes are needed for this.
+
 ## If it still freezes
 
 - Update your AMD graphics driver.
