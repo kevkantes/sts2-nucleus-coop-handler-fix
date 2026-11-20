@@ -1,3 +1,4 @@
+Game.AddOption("Graphics API", "Rendering backend for every instance. Vulkan is the default because D3D12 has hard-frozen some AMD integrated-GPU PCs (e.g. Radeon 780M) when running 2+ instances. Try D3D12 or OpenGL if Vulkan gives you trouble.", "RenderDriver", ["Vulkan","D3D12","OpenGL"]);
 Game.AddOption("Load Steam Workshop Mods?", "Manually installed mods will always be loaded, this option provides support for Steam Workshop Mods. Some mods may break the handler/game.", "WorkshopSupport", ["No","Yes"]);
 //Game.DirSymlinkExclusions = [];
 Game.FileSymlinkExclusions = [ 
@@ -128,6 +129,11 @@ Game.Play = function() {
 
   var SW = Context.GetFolder(Nucleus.Folder.InstancedGameFolder) + "\\data_sts2_windows_x86_64";
 
+  //Graphics API (same switch the game's own launch_*.bat files use)
+  var renderDrivers = { "Vulkan": "vulkan", "D3D12": "d3d12", "OpenGL": "opengl3" };
+  var renderDriver = renderDrivers[Context.Options["RenderDriver"]] || "vulkan";
+  Context.StartArguments = "--rendering-driver " + renderDriver;
+
   Context.CopyFolder(Context.ScriptFolder, Context.GetFolder(Nucleus.Folder.InstancedGameFolder));
   
   var savePath = SW + "\\steam_settings\\configs.user.ini";
@@ -182,27 +188,29 @@ Game.Play = function() {
 	  Context.ReplaceLinesInTextFile(settingsFile, modifySettings);
   };
 
-  // NOTE (fix for freeze when setup finishes with input unlocked):
-  // The GetRawInputData, RegisterRawInputDevices and MessageFilter hooks are installed at injection
-  // (see Game.ProtoInput.* above) and must stay installed for the whole session.
-  // Previously OnInputUnlocked uninstalled them while also enabling SetRawInputBypass. With bypass on,
-  // ProtoInput forwards ALL real mouse/keyboard input to the game as WM_INPUT carrying a fake
-  // 0xAB0000xx handle that only the GetRawInputData hook understands. With that hook removed, Godot
-  // called the real GetRawInputData on the fake handle, got an uninitialised buffer size back and
-  // allocated garbage-sized buffers on every input event -> both windows froze (audio kept playing).
+  // NOTE (fix for game/system freeze around input lock):
+  // Never uninstall/reinstall ProtoInput hooks while the game is running. On some machines
+  // (seen on Ryzen 8845HS / Radeon 780M, D3D12) removing hooks at runtime hangs both instances,
+  // and because Nucleus runs these callbacks on the thread that watches for the End key, a hang
+  // here can leave input locked system-wide (only a hard reset gets out).
   // Nucleus calls OnInputUnlocked automatically at the end of setup when input isn't locked yet,
-  // which is why it froze exactly at "press End to lock inputs" but not when locking early.
-  // This mirrors the reference example in "readme Proto Input.txt".
+  // so the old "uninstall everything on unlock" code ran on every launch that wasn't locked early.
+  // Also, SetRawInputBypass(true) forwards WM_INPUT with fake handles that only the
+  // GetRawInputData hook can decode, so that hook must stay installed.
+  //
+  // Now: hooks are only ever added (once). Unlock just flips cheap flags: message filters off
+  // and raw input bypass on. The fake cursor is never hidden (see OnInputUnlocked).
 
-  // Tracks which state the toggleable hooks are in, so repeated callbacks (Nucleus calls the
-  // current-state callback once more at the end of setup) don't stack duplicate EasyHook hooks.
-  var protoHooksLocked = null;
+  var protoHooksInstalled = false;
 
   Game.ProtoInput.OnInputLocked = function() {
     for (var i = 0; i < PlayerList.Count; i++) {
       var player = PlayerList[i];
 
-      if (protoHooksLocked !== true) {
+      if (!protoHooksInstalled) {
+        // Most of these are already installed at injection (Game.ProtoInput.*Hook = true above);
+        // GetAsyncKeyState/GetKeyboardState are added here. GetRawInputData, RegisterRawInput and
+        // MessageFilter are installed at injection and intentionally not touched again.
         ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
         ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
         ProtoInput.InstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
@@ -231,26 +239,14 @@ Game.Play = function() {
 
       ProtoInput.StopFocusMessageLoop(player.ProtoInputInstanceHandle);
     }
-    protoHooksLocked = true;
+    protoHooksInstalled = true;
   };
 
   Game.ProtoInput.OnInputUnlocked = function() {
     for (var i = 0; i < PlayerList.Count; i++) {
       var player = PlayerList[i];
 
-      ProtoInput.StopFocusMessageLoop(player.ProtoInputInstanceHandle);
-
-      if (protoHooksLocked !== false) {
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetCursorPosHookID);
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.SetCursorPosHookID);
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyStateHookID);
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetAsyncKeyStateHookID);
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.GetKeyboardStateHookID);
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.CursorVisibilityStateHookID);
-        // Intentionally drop fake focus so all instances don't react to the real mouse at once
-        ProtoInput.UninstallHook(player.ProtoInputInstanceHandle, ProtoInput.Values.FocusHooksHookID);
-        // DO NOT uninstall GetRawInputDataHookID / RegisterRawInputHookID / MessageFilterHookID here (see note above)
-      }
+      // No UninstallHook calls here on purpose (see note above).
 
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.RawInputFilterID);
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.MouseMoveFilterID);
@@ -261,12 +257,11 @@ Game.Play = function() {
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.MouseButtonFilterID);
       ProtoInput.DisableMessageFilter(player.ProtoInputInstanceHandle, ProtoInput.Values.KeyboardButtonFilterID);
 
-      ProtoInput.SetDrawFakeCursor(player.ProtoInputInstanceHandle, false);
+      // Fake cursor intentionally left as-is: hiding/re-showing ProtoInput's full-desktop
+      // overlay window on top of the D3D12 game windows is suspected of hard-hanging some AMD iGPU systems.
 
-      // Let the real mouse/keyboard through while unlocked. Safe now because the
-      // GetRawInputData hook stays installed to decode the forwarded WM_INPUT handles.
+      // Let the real mouse/keyboard through while unlocked (decoded by the GetRawInputData hook).
       ProtoInput.SetRawInputBypass(player.ProtoInputInstanceHandle, true);
     }
-    protoHooksLocked = false;
   };
 };

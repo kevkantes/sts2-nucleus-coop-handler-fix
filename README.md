@@ -1,54 +1,65 @@
-# Slay The Spire 2 – Nucleus Co-op handler fix
+# Slay The Spire 2 – Nucleus Co-op handler fix (AMD iGPU freeze)
 
-A fix for the [Nucleus Co-op](https://github.com/SplitScreen-Me/splitscreenme-nucleus) handler for
-**Slay The Spire 2** (Steam app 2868840). Without it, both game windows freeze at the end of setup,
-when Nucleus shows "press End to lock inputs".
+A patched version of the **Slay The Spire 2** handler for [Nucleus Co-op](https://github.com/SplitScreen-Me/splitscreenme-nucleus)
+(Steam app 2868840). It fixes a freeze that hard-locks the whole PC on some AMD integrated-GPU systems.
+
+**Credit:** the original handler is by **Escher**, shared in the Nucleus Co-op Discord:
+<https://discord.com/channels/142649962839277568/1479310319489912843>.
+Everything here is a small patch on top of that work. Download the original package (with its
+`Slay The Spire 2` folder of Goldberg emu files and `settings.save`) from there or from the
+[SplitScreen.Me hub](https://hub.splitscreen.me/).
 
 ## Symptom
 
-- All instances launch and get positioned. Then, as soon as setup finishes, **every game window freezes**.
-  The audio usually keeps playing.
-- If you lock inputs (End) **before** setup finishes, everything works.
-- It depends on the machine. It reproduced every time on a Ryzen 7 8845HS / Radeon 780M (D3D12) mini PC,
-  but never on a Ryzen 7 5800X3D / RTX 4090 desktop running the same handler.
+On an affected machine, with the original handler:
 
-## Cause
+- Setup finishes (instances launched and positioned). Then both game windows freeze when Nucleus
+  shows "press End to lock inputs", or right after you press End.
+- In the worst case the **whole PC hard-locks**: no keyboard, no Ctrl+Alt+Del, and you have to hold the power button.
+  Windows logs only Kernel-Power 41. There's no crash dump and no GPU-reset event.
+- Pressing End **before** setup finishes avoids it.
+- The same handler works fine on a desktop with a discrete NVIDIA GPU.
 
-If inputs are still unlocked when setup completes, Nucleus calls the handler's
-`Game.ProtoInput.OnInputUnlocked` callback. The original callback did two things:
-
-1. `SetRawInputBypass(true)`: ProtoInput now forwards **all** real mouse/keyboard input to every
-   instance as `WM_INPUT` messages. Each message carries a fake `HRAWINPUT` handle (`0xAB0000xx`),
-   and only ProtoInput's `GetRawInputData` hook knows how to decode it.
-2. `UninstallHook(GetRawInputDataHookID)` (plus `RegisterRawInputHookID` and `MessageFilterHookID`).
-
-With the hook removed, Godot's `WM_INPUT` handler passes the fake handle to the real `GetRawInputData`.
-The call fails and leaves the size variable uninitialised. Godot then allocates a garbage-sized
-buffer for every input event, which hangs the game. Whether that garbage value is harmless depends
-on the machine, which explains why only some machines are affected.
-
-ProtoInput's own reference example (`readme Proto Input.txt` in the Nucleus folder) leaves
-these three hooks installed for the whole session.
+The fix was tested on a mini PC with a Ryzen 7 8845HS and an integrated **Radeon 780M**, running two
+instances split-screen on one monitor. Game version was v0.113.1, Nucleus Co-op 2.4.2, AMD driver 32.0.32029 (Nov 2026).
 
 ## Changes
 
-- `OnInputUnlocked` no longer uninstalls the `GetRawInputData`, `RegisterRawInput` and `MessageFilter`
-  hooks. They're installed at injection and stay installed. Raw input bypass still works while
-  unlocked, so the real mouse can be used before locking.
-- `OnInputLocked` no longer reinstalls those three hooks.
-- Added a small state guard so repeated callbacks don't stack duplicate EasyHook hooks. Nucleus calls
-  the current-state callback once more at the end of setup.
+1. **New "Graphics API" handler option, default Vulkan.** The game defaults to D3D12 on AMD iGPUs,
+   and every hard lock happened with two D3D12 instances running. The handler now passes
+   `--rendering-driver vulkan` (the same switch as the game's own `launch_vulkan.bat`). D3D12 and OpenGL are
+   still selectable.
+2. **Hooks are never uninstalled at runtime.** Nucleus runs `OnInputUnlocked` automatically at the end of
+   setup if input isn't locked yet. The original callback then uninstalled most ProtoInput hooks, including
+   `GetRawInputData`, `RegisterRawInput` and `MessageFilter`, and pressing End reinstalled them. Two problems:
+   - With `SetRawInputBypass(true)`, ProtoInput forwards real input as `WM_INPUT` with fake handles that only
+     the `GetRawInputData` hook can decode. Without the hook, Godot reads garbage.
+   - Uninstalling and reinstalling hooks inside a running game was present in every failing run and absent from every working one.
 
-Nothing else is changed. The first commit is the original handler, so `git diff HEAD~1` shows exactly
-what changed.
+   Now hooks are only added, once. Unlocking just flips message filters and raw-input bypass.
+3. **The fake cursor overlay is no longer hidden and re-shown on unlock/lock.** ProtoInput's fake cursor is
+   a full-desktop topmost window. Toggling it over the D3D12 game windows was also present in every failing run, so it now stays as-is.
+
+What the guards change:
+
+- While inputs are unlocked, the fake cursors stay visible.
+- Each instance keeps its fake focus.
+- The real mouse and keyboard still pass through, thanks to raw-input bypass.
+
+Pressing End causes a **1–2 second pause**. That's expected: the lock step pulses each player's window for
+a second to give it focus, which was already in the original handler.
+
+The first commit in this repo is the original handler, so `git diff` shows exactly what changed.
 
 ## Install
 
-1. Install the Slay The Spire 2 handler from the [SplitScreen.Me hub](https://hub.splitscreen.me/) as
-   usual. It provides the `Slay The Spire 2` folder with the Goldberg emu files and the default `settings.save`.
-2. Replace `<Nucleus folder>\handlers\Slay The Spire 2.js` with the one in this repo. Back up the original first.
+1. Install the original Slay The Spire 2 handler (see Credit above).
+2. Back up `<Nucleus folder>\handlers\Slay The Spire 2.js`, then replace it with the one from this repo.
+   Nucleus re-reads the handler each time you press Play, so you don't need to restart it.
+3. Optional: change **Graphics API** in the handler's options. Vulkan is the default.
 
-If you still see a freeze, set `Game.LockInputAtStart = true;` as a fallback. Nucleus then
-locks input automatically about 5 seconds after setup.
+## If it still freezes
 
-Written for game version v0.113.1 and Nucleus Co-op 2.4.2.
+- Update your AMD graphics driver.
+- Try a different Graphics API option.
+- As a workaround, press End before setup finishes, or set `Game.LockInputAtStart = true;` in the `.js`.
